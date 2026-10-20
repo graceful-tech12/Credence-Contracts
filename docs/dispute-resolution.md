@@ -126,3 +126,60 @@ Quorum tests are in:
 
 - `contracts/arbitration/src/test.rs` — basic config + single-voter edge case
 - `contracts/arbitration/src/test_lifecycle.rs` — lifecycle integration tests for all quorum branches
+
+---
+
+## Standalone `dispute_resolution` contract
+
+> The sections above describe `credence_arbitration`. The `contracts/dispute_resolution`
+> crate is a separate, minimal dispute registry; its wire surface changed and is
+> documented here because indexers consume its events.
+
+### API
+
+| Function                     | Signature                                | Notes                                                       |
+| ---------------------------- | ---------------------------------------- | ----------------------------------------------------------- |
+| `create_dispute`             | `(creator: Address, resolver: Address) -> u64` | `creator.require_auth()`. Ids are sequential (`0, 1, 2, …`). |
+| `resolve`                    | `(caller: Address, id: u64) -> Result<(), DisputeError>` | Resolver only.                                 |
+| `close`                      | `(caller: Address, id: u64) -> Result<(), DisputeError>` | Resolver only.                                 |
+| `get_dispute`                | `(id: u64) -> Result<Dispute, DisputeError>` | Reads persistent storage and extends its TTL.               |
+| `get_dispute_count`          | `() -> u64`                              | Id the next `create_dispute` will use.                      |
+
+`Dispute` is `{ id, status, resolver, creator }`.
+
+### Event schema change (breaking)
+
+`created` used to publish `("created", id) → ("resolver", resolver)`. It now
+publishes:
+
+| Event      | Topics            | Data                  |
+| ---------- | ----------------- | --------------------- |
+| `created`  | `("created", id)` | `(creator, resolver)` |
+| `resolved` | `("resolved", id)` | `("by", caller)`     |
+| `closed`   | `("closed", id)` | `("by", caller)`      |
+
+An indexer that decoded the old `resolved`-style single-field data will now see
+a two-address tuple.
+
+### Check ordering
+
+`resolve` and `close` verify the caller **before** the status, so a
+non-resolver always receives `Unauthorized` — never `AlreadyClosed` — and
+cannot probe a dispute's state without being its resolver.
+
+### Storage and TTL
+
+- `DataKey::DisputeCounter` (instance) — the id counter, one key for the whole
+  contract, so the instance entry size never depends on the number of disputes.
+- `DataKey::Dispute(u64)` (persistent) — one entry per dispute, with TTL
+  extended on create, read and update.
+
+| Constant                    | Value       | Meaning                          |
+| --------------------------- | ----------- | -------------------------------- |
+| `PERSISTENT_TTL_THRESHOLD`  | `518_400`   | ~30 days; below this, extend     |
+| `PERSISTENT_TTL_EXTEND_TO`  | `3_110_400` | ~180 days on every access        |
+| `INSTANCE_TTL_THRESHOLD`    | `518_400`   | Same policy for the instance entry |
+| `INSTANCE_TTL_EXTEND_TO`    | `3_110_400` | Same policy for the instance entry |
+
+Both values stay below the network maximum entry TTL (`6_311_520` ledgers), so
+`extend_ttl` is always valid.

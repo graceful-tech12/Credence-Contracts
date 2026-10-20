@@ -63,14 +63,15 @@ fn setup() -> (
 fn test_create_dispute_returns_id_with_open_status() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
-    // The PRNG will produce some u64; confirm the record is immediately
-    // retrievable with the correct initial values.
+    // Ids come from a counter, so the first dispute is id 0.  Confirm the
+    // record is immediately retrievable with the correct initial values.
     let dispute = client.try_get_dispute(&id).unwrap().unwrap();
     assert_eq!(dispute.id, id);
     assert_eq!(dispute.status, DisputeStatus::Open);
     assert_eq!(dispute.resolver, resolver);
+    assert_eq!(dispute.creator, resolver);
 }
 
 // ─── § 2  get_dispute not-found boundary ────────────────────────────────────
@@ -86,7 +87,7 @@ fn test_get_dispute_not_found_returns_error() {
 fn test_get_dispute_found_after_create() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
     let dispute = client.try_get_dispute(&id).unwrap().unwrap();
     assert_eq!(dispute.status, DisputeStatus::Open);
 }
@@ -97,7 +98,7 @@ fn test_get_dispute_found_after_create() {
 fn test_close_transitions_open_to_closed() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
 
@@ -113,7 +114,7 @@ fn test_close_transitions_open_to_closed() {
 fn test_double_close_returns_already_closed() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
     let err = client.try_close(&resolver, &id).unwrap_err().unwrap();
@@ -131,7 +132,7 @@ fn test_close_by_non_resolver_returns_unauthorized() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
     let attacker = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     let err = client.try_close(&attacker, &id).unwrap_err().unwrap();
     assert_eq!(err, DisputeError::Unauthorized);
@@ -157,7 +158,7 @@ fn test_close_nonexistent_dispute_returns_not_found() {
 fn test_resolve_transitions_open_to_resolved() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_resolve(&resolver, &id).unwrap().unwrap();
 
@@ -172,7 +173,7 @@ fn test_resolve_transitions_open_to_resolved() {
 fn test_resolve_already_resolved_returns_already_closed() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_resolve(&resolver, &id).unwrap().unwrap();
     let err = client.try_resolve(&resolver, &id).unwrap_err().unwrap();
@@ -189,7 +190,7 @@ fn test_resolve_already_resolved_returns_already_closed() {
 fn test_resolve_closed_dispute_returns_already_closed() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
     let err = client.try_resolve(&resolver, &id).unwrap_err().unwrap();
@@ -207,7 +208,7 @@ fn test_resolve_by_non_resolver_returns_unauthorized() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
     let attacker = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     let err = client.try_resolve(&attacker, &id).unwrap_err().unwrap();
     assert_eq!(err, DisputeError::Unauthorized);
@@ -236,7 +237,7 @@ fn test_resolve_nonexistent_dispute_returns_not_found() {
 fn test_close_resolved_dispute_succeeds() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_resolve(&resolver, &id).unwrap().unwrap();
     client.try_close(&resolver, &id).unwrap().unwrap();
@@ -253,8 +254,8 @@ fn test_multiple_independent_disputes() {
     let resolver_a = Address::generate(&client.env);
     let resolver_b = Address::generate(&client.env);
 
-    let id_a = client.create_dispute(&resolver_a);
-    let id_b = client.create_dispute(&resolver_b);
+    let id_a = client.create_dispute(&resolver_a, &resolver_a);
+    let id_b = client.create_dispute(&resolver_b, &resolver_b);
 
     // Close only A.
     client.try_close(&resolver_a, &id_a).unwrap().unwrap();
@@ -279,7 +280,7 @@ fn test_multiple_independent_disputes() {
 fn test_close_records_require_auth_for_resolver() {
     let (env, client) = setup();
     let resolver = Address::generate(&env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
 
@@ -296,7 +297,7 @@ fn test_close_records_require_auth_for_resolver() {
 fn test_resolve_records_require_auth_for_resolver() {
     let (env, client) = setup();
     let resolver = Address::generate(&env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_resolve(&resolver, &id).unwrap().unwrap();
 
@@ -333,8 +334,9 @@ fn test_boundary_ids_are_valid_storage_keys() {
     let err_max = client.try_get_dispute(&u64::MAX).unwrap_err().unwrap();
     assert_eq!(err_max, DisputeError::DisputeNotFound);
 
-    // prng().gen::<u64>() must not panic regardless of the value produced.
-    let _id = client.create_dispute(&resolver);
+    // Counter-driven ids stay well inside the u64 range.
+    let id = client.create_dispute(&resolver, &resolver);
+    assert_eq!(id, 0);
 }
 
 // ─── § 18 concurrent pattern – resolver A cannot close resolver B's dispute ──
@@ -345,7 +347,7 @@ fn test_resolver_a_cannot_close_resolver_b_dispute() {
     let resolver_a = Address::generate(&client.env);
     let resolver_b = Address::generate(&client.env);
 
-    let id_b = client.create_dispute(&resolver_b);
+    let id_b = client.create_dispute(&resolver_b, &resolver_b);
 
     let err = client.try_close(&resolver_a, &id_b).unwrap_err().unwrap();
     assert_eq!(err, DisputeError::Unauthorized);
@@ -364,12 +366,11 @@ fn test_terminal_state_never_reverts() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
     let attacker = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
 
-    // Both fail; AlreadyClosed fires before Unauthorized because the status
-    // guard precedes the identity check in the implementation.
+    // Both fail, and neither leaves a partial write behind.
     let _ = client.try_close(&resolver, &id);
     let _ = client.try_close(&attacker, &id);
 
@@ -384,7 +385,7 @@ fn test_terminal_state_never_reverts() {
 fn test_resolver_field_preserved_through_lifecycle() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     // Open
     assert_eq!(
@@ -413,7 +414,7 @@ fn test_resolver_field_preserved_through_lifecycle() {
 fn test_create_dispute_emits_created_event() {
     let (env, client) = setup();
     let resolver = Address::generate(&env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     let events = env.events().all();
     let found = events.iter().any(|(_, topics, _data)| {
@@ -433,7 +434,7 @@ fn test_create_dispute_emits_created_event() {
 fn test_close_emits_closed_event() {
     let (env, client) = setup();
     let resolver = Address::generate(&env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_close(&resolver, &id).unwrap().unwrap();
 
@@ -455,7 +456,7 @@ fn test_close_emits_closed_event() {
 fn test_resolve_emits_resolved_event() {
     let (env, client) = setup();
     let resolver = Address::generate(&env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     client.try_resolve(&resolver, &id).unwrap().unwrap();
 
@@ -477,7 +478,7 @@ fn test_resolve_emits_resolved_event() {
 fn test_get_dispute_does_not_mutate_state() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     let d1 = client.try_get_dispute(&id).unwrap().unwrap();
     let d2 = client.try_get_dispute(&id).unwrap().unwrap();
@@ -492,7 +493,7 @@ fn test_get_dispute_does_not_mutate_state() {
 fn test_full_lifecycle_open_resolved_closed() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     // Open
     assert_eq!(
@@ -534,7 +535,7 @@ fn test_failed_calls_leave_state_unchanged() {
     let (_, client) = setup();
     let resolver = Address::generate(&client.env);
     let attacker = Address::generate(&client.env);
-    let id = client.create_dispute(&resolver);
+    let id = client.create_dispute(&resolver, &resolver);
 
     let before = client.try_get_dispute(&id).unwrap().unwrap();
 
