@@ -10,16 +10,61 @@ Open → Voting → Resolving → Resolved
   Cancelled  Cancelled  Tied
 ```
 
-Valid transitions enforced by the status machine:
+Valid state transitions:
 
-| From      | To        | Trigger                                             |
-| --------- | --------- | --------------------------------------------------- |
-| Open      | Voting    | `create_dispute` (implicit)                         |
-| Open      | Cancelled | `cancel_dispute` (creator or admin)                 |
-| Voting    | Resolving | `resolve_dispute` (after voting ends)               |
-| Voting    | Cancelled | `cancel_dispute` (creator or admin)                 |
-| Resolving | Resolved  | `resolve_dispute` (after tally, clear winner)       |
-| Resolving | Tied      | `resolve_dispute` (after tally, tie or equal votes) |
+| From     | To       | Trigger           | Authorisation              |
+| -------- | -------- | ----------------- | -------------------------- |
+| Open     | Resolved | `resolve_dispute` | resolver only              |
+| Resolved | Closed   | `close`           | resolver only              |
+| Open     | Closed   | `close`           | resolver only (if allowed) |
+| (any)    | (same)   | (no‑op)           | –                          |
+
+## Closure Invariants
+
+- **No double‑close**  
+  Calling `close` on a dispute already in `Closed` state reverts with `AlreadyClosed`.
+
+- **No unauthorised close**  
+  Only the designated `resolver` (set at dispute creation) may call `close`. Any other account triggers `Unauthorized`.
+
+- **Deterministic terminal state**  
+  Once a dispute is `Closed`, **no further state changes are allowed**. All mutating functions (`resolve_dispute`, `close`, and any future extensions) will revert with `DisputeClosed` error, ensuring a permanent and unambiguous final state.
+
+## Functions
+
+| Function          | Parameters                            | Description                                     |
+| ----------------- | ------------------------------------- | ----------------------------------------------- |
+| `create_dispute`  | `resolver: Address` → `u64`           | Creates a new dispute with the given resolver.  |
+| `get_dispute`     | `id: u64` → `Dispute`                 | Returns the dispute details.                    |
+| `resolve_dispute` | `id: u64, outcome: String` → `Result` | Sets the outcome and transitions to `Resolved`. |
+| `close`           | `id: u64` → `Result`                  | Finalises the dispute (transition to `Closed`). |
+
+## Errors
+
+| Error             | Code | Description                                |
+| ----------------- | ---- | ------------------------------------------ |
+| `DisputeNotFound` | 1    | The given dispute ID does not exist.       |
+| `AlreadyClosed`   | 2    | Attempt to close a dispute already closed. |
+| `Unauthorized`    | 3    | Caller is not the authorised resolver.     |
+| `DisputeClosed`   | 4    | Attempt to modify a closed dispute.        |
+
+## Events
+
+| Event              | Topics             | Data              | Trigger           |
+| ------------------ | ------------------ | ----------------- | ----------------- |
+| `dispute_closed`   | `("closed", id)`   | `("by", Address)` | `close`           |
+| `dispute_resolved` | `("resolved", id)` | `("by", Address)` | `resolve_dispute` |
+
+## Authorisation
+
+- The `resolver` address is immutable and set at creation.
+- Only the resolver can call `resolve_dispute` and `close`.
+- No other roles (e.g., admin) exist in this contract.
+
+## Security & Determinism
+
+- The `Closed` state is final – the contract guarantees that once a dispute is closed, its outcome cannot be altered, ensuring determinism for off‑chain consumers (e.g., slashing, payouts).
+- All checks are performed upfront; no re‑entrancy or storage corruption risks.
 
 ## Tied vs. Resolved
 
@@ -81,3 +126,60 @@ Quorum tests are in:
 
 - `contracts/arbitration/src/test.rs` — basic config + single-voter edge case
 - `contracts/arbitration/src/test_lifecycle.rs` — lifecycle integration tests for all quorum branches
+
+---
+
+## Standalone `dispute_resolution` contract
+
+> The sections above describe `credence_arbitration`. The `contracts/dispute_resolution`
+> crate is a separate, minimal dispute registry; its wire surface changed and is
+> documented here because indexers consume its events.
+
+### API
+
+| Function                     | Signature                                | Notes                                                       |
+| ---------------------------- | ---------------------------------------- | ----------------------------------------------------------- |
+| `create_dispute`             | `(creator: Address, resolver: Address) -> u64` | `creator.require_auth()`. Ids are sequential (`0, 1, 2, …`). |
+| `resolve`                    | `(caller: Address, id: u64) -> Result<(), DisputeError>` | Resolver only.                                 |
+| `close`                      | `(caller: Address, id: u64) -> Result<(), DisputeError>` | Resolver only.                                 |
+| `get_dispute`                | `(id: u64) -> Result<Dispute, DisputeError>` | Reads persistent storage and extends its TTL.               |
+| `get_dispute_count`          | `() -> u64`                              | Id the next `create_dispute` will use.                      |
+
+`Dispute` is `{ id, status, resolver, creator }`.
+
+### Event schema change (breaking)
+
+`created` used to publish `("created", id) → ("resolver", resolver)`. It now
+publishes:
+
+| Event      | Topics            | Data                  |
+| ---------- | ----------------- | --------------------- |
+| `created`  | `("created", id)` | `(creator, resolver)` |
+| `resolved` | `("resolved", id)` | `("by", caller)`     |
+| `closed`   | `("closed", id)` | `("by", caller)`      |
+
+An indexer that decoded the old `resolved`-style single-field data will now see
+a two-address tuple.
+
+### Check ordering
+
+`resolve` and `close` verify the caller **before** the status, so a
+non-resolver always receives `Unauthorized` — never `AlreadyClosed` — and
+cannot probe a dispute's state without being its resolver.
+
+### Storage and TTL
+
+- `DataKey::DisputeCounter` (instance) — the id counter, one key for the whole
+  contract, so the instance entry size never depends on the number of disputes.
+- `DataKey::Dispute(u64)` (persistent) — one entry per dispute, with TTL
+  extended on create, read and update.
+
+| Constant                    | Value       | Meaning                          |
+| --------------------------- | ----------- | -------------------------------- |
+| `PERSISTENT_TTL_THRESHOLD`  | `518_400`   | ~30 days; below this, extend     |
+| `PERSISTENT_TTL_EXTEND_TO`  | `3_110_400` | ~180 days on every access        |
+| `INSTANCE_TTL_THRESHOLD`    | `518_400`   | Same policy for the instance entry |
+| `INSTANCE_TTL_EXTEND_TO`    | `3_110_400` | Same policy for the instance entry |
+
+Both values stay below the network maximum entry TTL (`6_311_520` ledgers), so
+`extend_ttl` is always valid.
